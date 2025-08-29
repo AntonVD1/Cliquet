@@ -7,7 +7,7 @@ import math
 import pandas as pd
 import numpy as np
 
-from discount.helpers import year_fraction_365, cont_from_naca, naca_from_cont
+from helpers import year_fraction_365, cont_from_naca, naca_from_cont
 
 
 # -------------------------
