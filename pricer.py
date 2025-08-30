@@ -1,11 +1,27 @@
 from __future__ import annotations
 
-"""Simple Monte Carlo pricer for a Cliquet option.
+r"""Simple Monte Carlo pricer for a Cliquet option.
 
 This pricer uses the :func:`simulate_gbm` function to generate asset paths
 under a geometric Brownian motion with time‑dependent drift derived from
 discount factors.  The payoff is the sum of capped and floored *absolute*
 price differences over each reset period.
+
+Under the risk‑neutral measure the underlying evolves as
+
+    ``dS_t = S_t[(r - q) dt + \sigma dW_t]``
+
+with constant volatility ``\sigma`` and dividend yield ``q``.  For reset
+dates ``t_0 < t_1 < \dots < t_n`` the payoff of a Cliquet is
+
+    ``P = \sum_{i=1}^{n} \min(\max(S_{t_i} - S_{t_{i-1}}, floor), cap)``.
+
+The option value at ``t_0`` is the discounted expectation
+
+    ``V_0 = e^{-r T} \mathbb{E}[P]``, with ``T = t_n - t_0``.
+
+Monte Carlo simulation approximates this expectation by averaging sampled
+payoffs.
 
 The implementation purposely avoids heavy external dependencies such as
 QuantLib and relies only on the standard library and NumPy.
@@ -24,7 +40,7 @@ from helpers import year_fraction_365
 
 @dataclass
 class CliquetOptionPricer:
-    """Monte Carlo pricer for a discrete‑reset Cliquet option.
+    r"""Monte Carlo pricer for a discrete‑reset Cliquet option.
 
     Parameters
     ----------
@@ -52,6 +68,13 @@ class CliquetOptionPricer:
         Number of Monte Carlo paths.
     seed : int, optional
         Random seed for reproducibility.
+
+    Pricing
+    -------
+    For reset dates ``t_0 < \dots < t_n`` the payoff of one path is
+    ``P = \sum_{i=1}^{n} \min(\max(S_{t_i} - S_{t_{i-1}}, floor), cap)``.
+    The option value is the discounted expectation ``V_0 = e^{-r T} E[P]``
+    with ``T = t_n - t_0``.
     """
 
     S: float
@@ -91,7 +114,7 @@ class CliquetOptionPricer:
 
     # ------------------------------------------------------------------
     def _path_payoff(self, path: np.ndarray) -> float:
-        """Cliquet payoff using absolute price differences per period."""
+        r"""Return ``P = \sum_{i} \min(\max(S_{t_i}-S_{t_{i-1}}, floor), cap)`` for one path."""
         payoff = 0.0
         prev_price = path[0]
 
@@ -106,7 +129,7 @@ class CliquetOptionPricer:
 
     # ------------------------------------------------------------------
     def price(self) -> float:
-        """Estimate the option price via Monte Carlo simulation."""
+        r"""Estimate ``V_0 = e^{-rT} E[P]`` via Monte Carlo sampling."""
         rng = np.random.default_rng(self.seed)
         sum_payoffs = 0.0
 
