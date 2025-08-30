@@ -69,5 +69,58 @@ def simulate_gbm(
     return path
 
 
-__all__ = ["simulate_gbm"]
+def plot_gbm_simulations(
+    s0: float,
+    vol: float,
+    dates: Sequence[date],
+    discount_factor: Callable[[date, date], float],
+    n: int,
+    rng: Optional[np.random.Generator] = None,
+) -> np.ndarray:
+    """Simulate and plot multiple GBM paths.
+
+    Parameters
+    ----------
+    s0 : float
+        Starting asset price.
+    vol : float
+        Constant volatility of the process.
+    dates : Sequence[date]
+        Strictly increasing sequence of dates including the start date.
+    discount_factor : Callable[[date, date], float]
+        Function returning the discount factor between two dates.
+    n : int
+        Number of simulated paths.
+    rng : np.random.Generator, optional
+        Optional NumPy random generator. ``np.random.default_rng()`` is used
+        if not provided.
+
+    Returns
+    -------
+    np.ndarray
+        Simulated asset prices with shape ``(n, len(dates))``.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+
+    rng = rng or np.random.default_rng()
+    paths = np.empty((n, len(dates)), dtype=float)
+    for i in range(n):
+        paths[i] = simulate_gbm(s0, vol, dates, discount_factor, rng)
+
+    import matplotlib.pyplot as plt  # Import here to keep optional
+
+    for path in paths:
+        plt.plot(dates, path)
+
+    plt.xlabel("Date")
+    plt.ylabel("Price")
+    plt.title(f"{n} GBM simulations")
+    plt.grid(True)
+    plt.show()
+
+    return paths
+
+
+__all__ = ["simulate_gbm", "plot_gbm_simulations"]
 
