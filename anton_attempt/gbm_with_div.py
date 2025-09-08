@@ -22,7 +22,7 @@ def _parse_date(s: str) -> date:
 def _to_float(x: str) -> float:
     return float(str(x).replace(",", "").strip())
 
-CENTS_TO_RANDS = 0.01  # convert CSV dividend amounts (in cents) to rands
+CENTS_TO_RANDS = 0.01  # CSV dividend amounts are in CENTS → convert to RANDS
 
 def _read_dividends_csv(csv_path: str) -> List[Tuple[date, float]]:
     """
@@ -60,36 +60,56 @@ def _read_dividends_csv(csv_path: str) -> List[Tuple[date, float]]:
                     try:
                         pay_dt = _parse_date(date_cell)
                         amt_cents = _to_float(amt_cell)
-                        amt_rands = amt_cents * CENTS_TO_RANDS  # <-- cents → rands
+                        amt_rands = amt_cents * CENTS_TO_RANDS
                         if amt_rands != 0.0:
                             out.append((pay_dt, amt_rands))
                     except ValueError:
                         continue
     return out
 
+# ---- NEW: PV of future dividends at a specified date ----
+def pv_div(
+    dividends_csv: str,
+    disc_engine: object,   # your Discounter
+    valuation_date: date,  # first arg to discount_factor (the curve's "val" date)
+    at_date: date,         # the date to which we discount and from which we consider "future"
+) -> float:
+    """
+    PV at 'at_date' of all dividends with pay_date >= at_date.
+    Each dividend is discounted individually from pay_date back to at_date using:
+        DF(at_date -> pay_date) = disc_engine.discount_factor(valuation_date, at_date, pay_date)
+    """
+    divs = _read_dividends_csv(dividends_csv)  # [(pay_date, amount_in_rands)]
+    total = 0.0
+    # Guard: if at_date is before valuation_date, the ratio is still well-defined; we also
+    # enforce that dividends earlier than valuation_date are ignored.
+    cutoff = max(at_date, valuation_date)
+    for pd, a in divs:
+        if pd >= cutoff:
+            df = disc_engine.discount_factor(valuation_date, at_date, pd)
+            total += a * df
+    return total
+
 
 # ---------------- GBM ----------------
 @dataclass(frozen=True)
 class GBM_with_div:
     """
-    Geometric Brownian Motion (GBM) simulator with user-specified drift.
+    Geometric Brownian Motion (GBM) with optional dividend adjustments.
 
-    dS_t = mu * S_t dt + sigma * S_t dW_t
-    S_t = S_0 * exp( (mu - 0.5*sigma^2)*T + sigma*sqrt(T)*Z )
-
-    Optional dividends:
-      - Provide dividends_csv (wide layout; AMOUNTS IN CENTS) AND disc_engine.
-      - start ex-div: S0_ex = s0 - PV_all_divs @ start_date (start = start_date)
-      - at each reset date d: add PV(divs with pay_date <= d), discounted with start = d.
+    Optional dividends behavior when both 'dividends_csv' and 'disc_engine' are provided:
+      1) Initial spot is reduced by PV of all future dividends at start_date:
+           S0_ex = s0 - pv_div(..., at_date=start_date)
+      2) At each reset date 'd', the reported value adds back the PV at 'd' of future dividends:
+           S_cum(d) = S_ex(d) + pv_div(..., at_date=d)
     """
     s0: float
     sigma: float
     mu: float
     start_date: date
 
-    # ---- optional dividend wiring ----
     dividends_csv: Optional[str] = None
-    disc_engine: Optional[object] = None  # type: ignore (expects your Discounter)
+    disc_engine: Optional[object] = None  # expects Discounter
 
     def simulate_at(
         self,
@@ -128,8 +148,8 @@ class GBM_with_div:
         Returns (n, len(reset_dates)) where each row is a path.
 
         If dividends_csv and disc_engine are provided:
-          - initial S is reduced by PV(all dividends) at start_date (start=start_date)
-          - at each reset date d, output adds PV(dividends with pay<=d) discounted from start=d
+          - initial S is reduced by PV(all future dividends) at start_date
+          - at each reset date d, output adds PV(all future dividends at d)
         """
         dates = list(reset_dates)
         m = len(dates)
@@ -137,31 +157,16 @@ class GBM_with_div:
 
         base_s0 = float(self.s0 if (spot0 is None or spot0 <= 0) else spot0)
 
-        # ---- dividends precompute (optional) ----
+        # ---- dividends (optional) via pv_div ----
         use_divs = (self.dividends_csv is not None) and (self.disc_engine is not None)
         if use_divs:
-            divs = _read_dividends_csv(self.dividends_csv)  # [(pay_date, amount_in_rands)]
-            # Eligible: pay_date >= start_date
-            eligible = [(pd, a) for (pd, a) in divs if pd >= self.start_date]
-
-            # PV of ALL dividends at start_date: start = start_date
-            pv_all = 0.0
-            for pd, a in eligible:
-                df = self.disc_engine.discount_factor(self.start_date, self.start_date, pd)
-                pv_all += a * df
-
-            # PV up to each reset date using start = that reset date
-            pv_upto = []
-            for d in dates:
-                s = 0.0
-                for pd, a in eligible:
-                    if pd <= d:
-                        df = self.disc_engine.discount_factor(self.start_date, d, pd)
-                        s += a * df
-                pv_upto.append(s)
+            pv_all = pv_div(self.dividends_csv, self.disc_engine, self.start_date, self.start_date)
+            pv_at_dates = [
+                pv_div(self.dividends_csv, self.disc_engine, self.start_date, d) for d in dates
+            ]
         else:
             pv_all = 0.0
-            pv_upto = [0.0] * m
+            pv_at_dates = [0.0] * m
 
         # initial ex-div spots
         S = np.full(n, base_s0 - pv_all, dtype=float)
@@ -192,8 +197,8 @@ class GBM_with_div:
                 diff = sig * math.sqrt(dt) * z
                 S = S * np.exp(drift + diff)
 
-            # cum-div value at reset: ex-div path + PV(divs up to this date, valued AT this date)
-            out[:, j] = S + pv_upto[j]
+            # ex-div path + PV of FUTURE dividends from this date (valued AT this date)
+            out[:, j] = S + pv_at_dates[j]
             prev_date = d
 
         return out
