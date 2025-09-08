@@ -22,11 +22,13 @@ def _parse_date(s: str) -> date:
 def _to_float(x: str) -> float:
     return float(str(x).replace(",", "").strip())
 
+CENTS_TO_RANDS = 0.01  # convert CSV dividend amounts (in cents) to rands
+
 def _read_dividends_csv(csv_path: str) -> List[Tuple[date, float]]:
     """
     Reads a 'wide' CSV laid out as repeating triplets:
-        stock_name, pay_date, amount, <blank?>, stock_name, pay_date, amount, <blank?>, ...
-    Returns a flat list of (pay_date, amount), ignoring blank/malformed cells and zeros.
+        stock_name, pay_date, amount_in_cents, <blank?>, stock_name, pay_date, amount_in_cents, <blank?>, ...
+    Returns a flat list of (pay_date, amount_in_rands), ignoring blank/malformed cells and zeros.
     """
     import csv
     out: List[Tuple[date, float]] = []
@@ -57,9 +59,10 @@ def _read_dividends_csv(csv_path: str) -> List[Tuple[date, float]]:
                 if date_cell and amt_cell:
                     try:
                         pay_dt = _parse_date(date_cell)
-                        amt = _to_float(amt_cell)
-                        if amt != 0.0:
-                            out.append((pay_dt, amt))
+                        amt_cents = _to_float(amt_cell)
+                        amt_rands = amt_cents * CENTS_TO_RANDS  # <-- cents → rands
+                        if amt_rands != 0.0:
+                            out.append((pay_dt, amt_rands))
                     except ValueError:
                         continue
     return out
@@ -75,7 +78,7 @@ class GBM_with_div:
     S_t = S_0 * exp( (mu - 0.5*sigma^2)*T + sigma*sqrt(T)*Z )
 
     Optional dividends:
-      - Provide dividends_csv (wide layout) AND disc_engine.
+      - Provide dividends_csv (wide layout; AMOUNTS IN CENTS) AND disc_engine.
       - start ex-div: S0_ex = s0 - PV_all_divs @ start_date (start = start_date)
       - at each reset date d: add PV(divs with pay_date <= d), discounted with start = d.
     """
@@ -84,7 +87,7 @@ class GBM_with_div:
     mu: float
     start_date: date
 
-    # ---- NEW: optional dividend wiring (constructor OPTIONAL) ----
+    # ---- optional dividend wiring ----
     dividends_csv: Optional[str] = None
     disc_engine: Optional[object] = None  # type: ignore (expects your Discounter)
 
@@ -124,9 +127,6 @@ class GBM_with_div:
         Simulate continuous GBM paths sequentially across reset_dates.
         Returns (n, len(reset_dates)) where each row is a path.
 
-        Step:
-            S_{t+Δt} = S_t * exp( (mu - 0.5*sigma^2) * Δt + sigma * sqrt(Δt) * Z )
-
         If dividends_csv and disc_engine are provided:
           - initial S is reduced by PV(all dividends) at start_date (start=start_date)
           - at each reset date d, output adds PV(dividends with pay<=d) discounted from start=d
@@ -140,7 +140,7 @@ class GBM_with_div:
         # ---- dividends precompute (optional) ----
         use_divs = (self.dividends_csv is not None) and (self.disc_engine is not None)
         if use_divs:
-            divs = _read_dividends_csv(self.dividends_csv)  # [(pay_date, amount)]
+            divs = _read_dividends_csv(self.dividends_csv)  # [(pay_date, amount_in_rands)]
             # Eligible: pay_date >= start_date
             eligible = [(pd, a) for (pd, a) in divs if pd >= self.start_date]
 
@@ -150,7 +150,7 @@ class GBM_with_div:
                 df = self.disc_engine.discount_factor(self.start_date, self.start_date, pd)
                 pv_all += a * df
 
-            # PV up to each reset date using start = that reset date (your "same date" rule)
+            # PV up to each reset date using start = that reset date
             pv_upto = []
             for d in dates:
                 s = 0.0
